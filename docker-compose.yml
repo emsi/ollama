@@ -1,0 +1,15 @@
+services:
+  ollama:
+    runtime: nvidia
+    build:
+      context: .
+      dockerfile: Dockerfile
+    expose: 
+      - 11434
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ollama:/root/.ollama
+
+volumes:
+  ollama:
