@@ -1,6 +1,7 @@
 services:
   ollama:
     runtime: nvidia
+    image: ollama/ollama
     build:
       context: .
       dockerfile: Dockerfile
