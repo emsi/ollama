@@ -11,6 +11,7 @@ import (
 
 	"github.com/jmorganca/ollama/api"
 	"github.com/jmorganca/ollama/format"
+	"github.com/jmorganca/ollama/gpu"
 )
 
 type LLM interface {
@@ -18,10 +19,10 @@ type LLM interface {
 	Embedding(context.Context, string) ([]float64, error)
 	Encode(context.Context, string) ([]int, error)
 	Decode(context.Context, []int) (string, error)
-	SetOptions(api.Options)
 	Close()
-	Ping(context.Context) error
 }
+
+var AvailableShims = map[string]string{}
 
 func New(workDir, model string, adapters, projectors []string, opts api.Options) (LLM, error) {
 	if _, err := os.Stat(model); err != nil {
@@ -40,16 +41,6 @@ func New(workDir, model string, adapters, projectors []string, opts api.Options)
 	}
 
 	if runtime.GOOS == "darwin" {
-		switch ggml.FileType() {
-		case "F32", "Q5_0", "Q5_1", "Q8_0":
-			if ggml.Name() != "gguf" && opts.NumGPU != 0 {
-				// GGML Q8_0 do not support Metal API and will
-				// cause the runner to segmentation fault so disable GPU
-				log.Printf("WARNING: GPU disabled for F32, Q5_0, Q5_1, and Q8_0")
-				opts.NumGPU = 0
-			}
-		}
-
 		var requiredMemory int64
 		var f16Multiplier int64 = 2
 
@@ -60,6 +51,8 @@ func New(workDir, model string, adapters, projectors []string, opts api.Options)
 			requiredMemory = 16 * format.GigaByte
 		case "30B", "34B", "40B":
 			requiredMemory = 32 * format.GigaByte
+		case "47B":
+			requiredMemory = 48 * format.GigaByte
 		case "65B", "70B":
 			requiredMemory = 64 * format.GigaByte
 		case "180B":
@@ -70,22 +63,34 @@ func New(workDir, model string, adapters, projectors []string, opts api.Options)
 		systemMemory := int64(memory.TotalMemory())
 
 		if ggml.FileType() == "F16" && requiredMemory*f16Multiplier > systemMemory {
-			return nil, fmt.Errorf("F16 model requires at least %s of total memory", format.HumanBytes(requiredMemory))
+			return nil, fmt.Errorf("F16 model requires at least %s of memory", format.HumanBytes(requiredMemory))
 		} else if requiredMemory > systemMemory {
-			return nil, fmt.Errorf("model requires at least %s of total memory", format.HumanBytes(requiredMemory))
+			return nil, fmt.Errorf("model requires at least %s of memory", format.HumanBytes(requiredMemory))
 		}
 	}
 
-	switch ggml.Name() {
-	case "gguf":
-		// TODO: gguf will load these options automatically from the model binary
-		opts.NumGQA = 0
-		opts.RopeFrequencyBase = 0.0
-		opts.RopeFrequencyScale = 0.0
-		return newLlama(model, adapters, projectors, chooseRunners(workDir, "gguf"), ggml.NumLayers(), opts)
-	case "ggml", "ggmf", "ggjt", "ggla":
-		return newLlama(model, adapters, projectors, chooseRunners(workDir, "ggml"), ggml.NumLayers(), opts)
-	default:
-		return nil, fmt.Errorf("unknown ggml type: %s", ggml.ModelFamily())
+	opts.NumGQA = 0
+	opts.RopeFrequencyBase = 0.0
+	opts.RopeFrequencyScale = 0.0
+	gpuInfo := gpu.GetGPUInfo()
+	return newLlmServer(gpuInfo.Library, model, adapters, projectors, ggml.NumLayers(), opts)
+}
+
+// Give any native cgo implementations an opportunity to initialize
+func Init(workdir string) error {
+	return nativeInit(workdir)
+}
+
+func newLlmServer(library, model string, adapters, projectors []string, numLayers int64, opts api.Options) (extServer, error) {
+	if _, libPresent := AvailableShims[library]; libPresent && library != "default" {
+		srv, err := newDynamicShimExtServer(AvailableShims[library], model, adapters, projectors, numLayers, opts)
+		if err == nil {
+			return srv, nil
+		}
+		log.Printf("Failed to load dynamic library %s - falling back to CPU mode %s", library, err)
+		// TODO - update some state to indicate we were unable to load the GPU library for future "info" ux
 	}
+
+	return newDefaultExtServer(model, adapters, projectors, numLayers, opts)
+
 }
