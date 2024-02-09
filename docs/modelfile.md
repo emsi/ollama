@@ -19,6 +19,7 @@ A model file is the blueprint to create and share models with Ollama.
   - [SYSTEM](#system)
   - [ADAPTER](#adapter)
   - [LICENSE](#license)
+  - [MESSAGE](#message)
 - [Notes](#notes)
 
 ## Format
@@ -38,6 +39,7 @@ INSTRUCTION arguments
 | [`SYSTEM`](#system)                 | Specifies the system message that will be set in the template. |
 | [`ADAPTER`](#adapter)               | Defines the (Q)LoRA adapters to apply to the model.            |
 | [`LICENSE`](#license)               | Specifies the legal license.                                   |
+| [`MESSAGE`](#message)               | Specify message history.                                       |
 
 ## Examples
 
@@ -156,11 +158,12 @@ PARAMETER <parameter> <parametervalue>
 
 #### Template Variables
 
-| Variable        | Description                                                                                                   |
-| --------------- | ------------------------------------------------------------------------------------------------------------- |
-| `{{ .System }}` | The system message used to specify custom behavior, this must also be set in the Modelfile as an instruction. |
-| `{{ .Prompt }}` | The incoming prompt, this is not specified in the model file and will be set based on input.                  |
-| `{{ .First }}`  | A boolean value used to render specific template information for the first generation of a session.           |
+| Variable          | Description                                                                                                   |
+| ----------------- | ------------------------------------------------------------------------------------------------------------- |
+| `{{ .System }}`   | The system message used to specify custom behavior, this must also be set in the Modelfile as an instruction. |
+| `{{ .Prompt }}`   | The incoming prompt, this is not specified in the model file and will be set based on input.                  |
+| `{{ .Response }}` | The response from the LLM, if not specified response is appended to the end of the template.                  |
+| `{{ .First }}`    | A boolean value used to render specific template information for the first generation of a session.           |
 
 ```modelfile
 TEMPLATE """
@@ -202,6 +205,19 @@ The `LICENSE` instruction allows you to specify the legal license under which th
 LICENSE """
 <license text>
 """
+```
+
+### MESSAGE
+
+The `MESSAGE` instruction allows you to specify a message history for the model to use when responding:
+
+```modelfile
+MESSAGE user Is Toronto in Canada?
+MESSAGE assistant yes
+MESSAGE user Is Sacramento in Canada?
+MESSAGE assistant no
+MESSAGE user Is Ontario in Canada?
+MESSAGE assistant yes
 ```
 
 ## Notes

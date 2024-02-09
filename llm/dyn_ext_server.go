@@ -4,60 +4,42 @@ package llm
 #cgo CFLAGS: -I${SRCDIR}/ext_server -I${SRCDIR}/llama.cpp -I${SRCDIR}/llama.cpp/common -I${SRCDIR}/llama.cpp/examples/server
 #cgo CFLAGS: -DNDEBUG -DLLAMA_SERVER_LIBRARY=1 -D_XOPEN_SOURCE=600 -DACCELERATE_NEW_LAPACK -DACCELERATE_LAPACK_ILP64
 #cgo CFLAGS: -Wmissing-noreturn -Wextra -Wcast-qual -Wno-unused-function -Wno-array-bounds
-#cgo CPPFLAGS: -Ofast -Wextra -Wno-unused-function -Wno-unused-variable -Wno-deprecated-declarations -Wno-unused-but-set-variable
+#cgo CPPFLAGS: -Ofast -Wextra -Wno-unused-function -Wno-unused-variable -Wno-deprecated-declarations
 #cgo darwin CFLAGS: -D_DARWIN_C_SOURCE
 #cgo darwin CPPFLAGS:  -DGGML_USE_ACCELERATE
 #cgo darwin CPPFLAGS: -DGGML_USE_METAL -DGGML_METAL_NDEBUG
 #cgo darwin LDFLAGS: -lc++ -framework Accelerate
 #cgo darwin LDFLAGS: -framework Foundation -framework Metal -framework MetalKit -framework MetalPerformanceShaders
-#cgo darwin LDFLAGS: ${SRCDIR}/llama.cpp/build/darwin/metal/lib/libcommon.a
-#cgo darwin LDFLAGS: ${SRCDIR}/llama.cpp/build/darwin/metal/lib/libext_server.a
-#cgo darwin LDFLAGS: ${SRCDIR}/llama.cpp/build/darwin/metal/lib/libllama.a
-#cgo darwin LDFLAGS: ${SRCDIR}/llama.cpp/build/darwin/metal/lib/libggml_static.a
 #cgo linux CFLAGS: -D_GNU_SOURCE
-#cgo linux windows CFLAGS: -DGGML_CUDA_DMMV_X=32 -DGGML_CUDA_MMV_Y=1 -DGGML_CUDA_PEER_MAX_BATCH_SIZE=128 -DGGML_USE_CUBLAS
-#cgo linux LDFLAGS: -L/usr/local/cuda/targets/x86_64-linux/lib -L/usr/local/cuda/lib64 -L/usr/local/cuda/targets/x86_64-linux/lib/stubs
-#cgo linux LDFLAGS: ${SRCDIR}/llama.cpp/build/linux/cpu/lib/libext_server.a
-#cgo linux LDFLAGS: ${SRCDIR}/llama.cpp/build/linux/cpu/lib/libcommon.a
-#cgo linux LDFLAGS: ${SRCDIR}/llama.cpp/build/linux/cpu/lib/libllama.a
-#cgo linux LDFLAGS: ${SRCDIR}/llama.cpp/build/linux/cpu/lib/libggml_static.a
 #cgo linux LDFLAGS: -lrt -ldl -lstdc++ -lm
 #cgo linux windows LDFLAGS: -lpthread
 
 #include <stdlib.h>
-#include "ext_server.h"
+#include "dyn_ext_server.h"
 
 */
 import "C"
+
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 	"unsafe"
 
 	"github.com/jmorganca/ollama/api"
-	"github.com/jmorganca/ollama/gpu"
 )
 
-type extServer interface {
-	LLM
-	llama_server_init(sparams *C.ext_server_params_t, err *C.ext_server_resp_t)
-	llama_server_start()
-	llama_server_stop()
-	llama_server_completion(json_req *C.char, resp *C.ext_server_resp_t)
-	llama_server_completion_next_result(task_id C.int, resp *C.ext_server_task_result_t)
-	llama_server_completion_cancel(task_id C.int, err *C.ext_server_resp_t)
-	llama_server_release_task_result(result *C.ext_server_task_result_t)
-	llama_server_tokenize(json_req *C.char, json_resp **C.char, err *C.ext_server_resp_t)
-	llama_server_detokenize(json_req *C.char, json_resp **C.char, err *C.ext_server_resp_t)
-	llama_server_embedding(json_req *C.char, json_resp **C.char, err *C.ext_server_resp_t)
-	llama_server_release_json_resp(json_resp **C.char)
+type dynExtServer struct {
+	s       C.struct_dynamic_llama_server
+	options api.Options
 }
 
 // Note: current implementation does not support concurrent instantiations
@@ -82,25 +64,39 @@ func extServerResponseToErr(resp C.ext_server_resp_t) error {
 	return fmt.Errorf(C.GoString(resp.msg))
 }
 
-func newExtServer(server extServer, model string, adapters, projectors []string, numLayers int64, opts api.Options) (extServer, error) {
+// Note: current implementation does not support concurrent instantiations
+var llm *dynExtServer
+
+func newDynExtServer(library, model string, adapters, projectors []string, opts api.Options) (LLM, error) {
 	if !mutex.TryLock() {
-		log.Printf("concurrent llm servers not yet supported, waiting for prior server to complete")
+		slog.Info("concurrent llm servers not yet supported, waiting for prior server to complete")
 		mutex.Lock()
 	}
-	fileInfo, err := os.Stat(model)
-	if err != nil {
-		return nil, err
+	updatePath(filepath.Dir(library))
+	libPath := C.CString(library)
+	defer C.free(unsafe.Pointer(libPath))
+	resp := newExtServerResp(512)
+	defer freeExtServerResp(resp)
+	var srv C.struct_dynamic_llama_server
+	C.dyn_init(libPath, &srv, &resp)
+	if resp.id < 0 {
+		mutex.Unlock()
+		return nil, fmt.Errorf("Unable to load dynamic library: %s", C.GoString(resp.msg))
 	}
+	llm = &dynExtServer{
+		s:       srv,
+		options: opts,
+	}
+	slog.Info(fmt.Sprintf("Loading Dynamic llm server: %s", library))
+
 	var sparams C.ext_server_params_t
 	sparams.model = C.CString(model)
 	defer C.free(unsafe.Pointer(sparams.model))
 
-	numGPU := gpu.NumGPU(numLayers, fileInfo.Size(), opts)
-
 	sparams.embedding = true
 	sparams.n_ctx = C.uint(opts.NumCtx)
 	sparams.n_batch = C.uint(opts.NumBatch)
-	sparams.n_gpu_layers = C.int(numGPU)
+	sparams.n_gpu_layers = C.int(opts.NumGPU)
 	sparams.main_gpu = C.int(opts.MainGPU)
 	sparams.n_parallel = 1 // TODO - wire up concurrency
 
@@ -140,29 +136,35 @@ func newExtServer(server extServer, model string, adapters, projectors []string,
 
 	sparams.n_threads = C.uint(opts.NumThread)
 
-	log.Printf("Initializing internal llama server")
-	resp := newExtServerResp(128)
-	defer freeExtServerResp(resp)
-	server.llama_server_init(&sparams, &resp)
-	if resp.id < 0 {
-		return nil, extServerResponseToErr(resp)
+	if debug := os.Getenv("OLLAMA_DEBUG"); debug != "" {
+		sparams.verbose_logging = C.bool(true)
+	} else {
+		sparams.verbose_logging = C.bool(false)
 	}
 
-	log.Printf("Starting internal llama main loop")
-	server.llama_server_start()
-	return server, nil
+	slog.Info("Initializing llama server")
+	initResp := newExtServerResp(128)
+	defer freeExtServerResp(initResp)
+	C.dyn_llama_server_init(llm.s, &sparams, &initResp)
+	if initResp.id < 0 {
+		mutex.Unlock()
+		err := extServerResponseToErr(initResp)
+		slog.Debug(fmt.Sprintf("failure during initialization: %s", err))
+		return nil, err
+	}
+
+	slog.Info("Starting llama main loop")
+	C.dyn_llama_server_start(llm.s)
+	return llm, nil
 }
 
-func predict(ctx context.Context, llm extServer, predict PredictOpts, fn func(PredictResult)) error {
+func (llm *dynExtServer) Predict(ctx context.Context, predict PredictOpts, fn func(PredictResult)) error {
 	resp := newExtServerResp(128)
 	defer freeExtServerResp(resp)
-	var imageData []ImageData
+
 	if len(predict.Images) > 0 {
-		for cnt, i := range predict.Images {
-			imageData = append(imageData, ImageData{Data: i, ID: cnt})
-		}
+		slog.Info(fmt.Sprintf("loaded %d images", len(predict.Images)))
 	}
-	log.Printf("loaded %d images", len(imageData))
 
 	request := map[string]any{
 		"prompt":            predict.Prompt,
@@ -184,7 +186,7 @@ func predict(ctx context.Context, llm extServer, predict PredictOpts, fn func(Pr
 		"penalize_nl":       predict.Options.PenalizeNewline,
 		"seed":              predict.Options.Seed,
 		"stop":              predict.Options.Stop,
-		"image_data":        imageData,
+		"image_data":        predict.Images,
 		"cache_prompt":      true,
 	}
 
@@ -211,7 +213,7 @@ func predict(ctx context.Context, llm extServer, predict PredictOpts, fn func(Pr
 		req := C.CString(buffer.String())
 		defer C.free(unsafe.Pointer(req))
 
-		llm.llama_server_completion(req, &resp)
+		C.dyn_llama_server_completion(llm.s, req, &resp)
 		if resp.id < 0 {
 			return extServerResponseToErr(resp)
 		}
@@ -222,7 +224,7 @@ func predict(ctx context.Context, llm extServer, predict PredictOpts, fn func(Pr
 			select {
 			case <-ctx.Done():
 				// This handles the request cancellation
-				llm.llama_server_completion_cancel(resp.id, &resp)
+				C.dyn_llama_server_completion_cancel(llm.s, resp.id, &resp)
 				if resp.id < 0 {
 					return extServerResponseToErr(resp)
 				} else {
@@ -230,13 +232,13 @@ func predict(ctx context.Context, llm extServer, predict PredictOpts, fn func(Pr
 				}
 			default:
 				var result C.ext_server_task_result_t
-				llm.llama_server_completion_next_result(resp.id, &result)
+				C.dyn_llama_server_completion_next_result(llm.s, resp.id, &result)
 				json_resp := C.GoString(result.json_resp)
-				llm.llama_server_release_task_result(&result)
+				C.dyn_llama_server_release_task_result(llm.s, &result)
 
 				var p prediction
 				if err := json.Unmarshal([]byte(json_resp), &p); err != nil {
-					llm.llama_server_completion_cancel(resp.id, &resp)
+					C.dyn_llama_server_completion_cancel(llm.s, resp.id, &resp)
 					if resp.id < 0 {
 						return fmt.Errorf("error unmarshaling llm prediction response: %w and cancel %s", err, C.GoString(resp.msg))
 					} else {
@@ -277,7 +279,7 @@ func predict(ctx context.Context, llm extServer, predict PredictOpts, fn func(Pr
 	return fmt.Errorf("max retries exceeded")
 }
 
-func encode(llm extServer, ctx context.Context, prompt string) ([]int, error) {
+func (llm *dynExtServer) Encode(ctx context.Context, prompt string) ([]int, error) {
 	data, err := json.Marshal(TokenizeRequest{Content: prompt})
 	if err != nil {
 		return nil, fmt.Errorf("marshaling encode data: %w", err)
@@ -287,11 +289,11 @@ func encode(llm extServer, ctx context.Context, prompt string) ([]int, error) {
 	var json_resp *C.char
 	resp := newExtServerResp(128)
 	defer freeExtServerResp(resp)
-	llm.llama_server_tokenize(req, &json_resp, &resp)
+	C.dyn_llama_server_tokenize(llm.s, req, &json_resp, &resp)
 	if resp.id < 0 {
 		return nil, extServerResponseToErr(resp)
 	}
-	defer llm.llama_server_release_json_resp(&json_resp)
+	defer C.dyn_llama_server_release_json_resp(llm.s, &json_resp)
 
 	var encoded TokenizeResponse
 	if err2 := json.Unmarshal([]byte(C.GoString(json_resp)), &encoded); err2 != nil {
@@ -301,7 +303,7 @@ func encode(llm extServer, ctx context.Context, prompt string) ([]int, error) {
 	return encoded.Tokens, err
 }
 
-func decode(llm extServer, ctx context.Context, tokens []int) (string, error) {
+func (llm *dynExtServer) Decode(ctx context.Context, tokens []int) (string, error) {
 	if len(tokens) == 0 {
 		return "", nil
 	}
@@ -315,11 +317,11 @@ func decode(llm extServer, ctx context.Context, tokens []int) (string, error) {
 	var json_resp *C.char
 	resp := newExtServerResp(128)
 	defer freeExtServerResp(resp)
-	llm.llama_server_detokenize(req, &json_resp, &resp)
+	C.dyn_llama_server_detokenize(llm.s, req, &json_resp, &resp)
 	if resp.id < 0 {
 		return "", extServerResponseToErr(resp)
 	}
-	defer llm.llama_server_release_json_resp(&json_resp)
+	defer C.dyn_llama_server_release_json_resp(llm.s, &json_resp)
 
 	var decoded DetokenizeResponse
 	if err2 := json.Unmarshal([]byte(C.GoString(json_resp)), &decoded); err2 != nil {
@@ -329,7 +331,7 @@ func decode(llm extServer, ctx context.Context, tokens []int) (string, error) {
 	return decoded.Content, err
 }
 
-func embedding(llm extServer, ctx context.Context, input string) ([]float64, error) {
+func (llm *dynExtServer) Embedding(ctx context.Context, input string) ([]float64, error) {
 	data, err := json.Marshal(TokenizeRequest{Content: input})
 	if err != nil {
 		return nil, fmt.Errorf("error marshaling embed data: %w", err)
@@ -340,11 +342,11 @@ func embedding(llm extServer, ctx context.Context, input string) ([]float64, err
 	var json_resp *C.char
 	resp := newExtServerResp(128)
 	defer freeExtServerResp(resp)
-	llm.llama_server_embedding(req, &json_resp, &resp)
+	C.dyn_llama_server_embedding(llm.s, req, &json_resp, &resp)
 	if resp.id < 0 {
 		return nil, extServerResponseToErr(resp)
 	}
-	defer llm.llama_server_release_json_resp(&json_resp)
+	defer C.dyn_llama_server_release_json_resp(llm.s, &json_resp)
 
 	var embedding EmbeddingResponse
 	if err := json.Unmarshal([]byte(C.GoString(json_resp)), &embedding); err != nil {
@@ -354,7 +356,29 @@ func embedding(llm extServer, ctx context.Context, input string) ([]float64, err
 	return embedding.Embedding, nil
 }
 
-func close(llm extServer) {
-	llm.llama_server_stop()
+func (llm *dynExtServer) Close() {
+	C.dyn_llama_server_stop(llm.s)
 	mutex.Unlock()
+}
+
+func updatePath(dir string) {
+	if runtime.GOOS == "windows" {
+		tmpDir := filepath.Dir(dir)
+		pathComponents := strings.Split(os.Getenv("PATH"), ";")
+		i := 0
+		for _, comp := range pathComponents {
+			if strings.EqualFold(comp, dir) {
+				return
+			}
+			// Remove any other prior paths to our temp dir
+			if !strings.HasPrefix(strings.ToLower(comp), strings.ToLower(tmpDir)) {
+				pathComponents[i] = comp
+				i++
+			}
+		}
+		newPath := strings.Join(append([]string{dir}, pathComponents...), ";")
+		slog.Info(fmt.Sprintf("Updating PATH to %s", newPath))
+		os.Setenv("PATH", newPath)
+	}
+	// linux and darwin rely on rpath
 }
