@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -29,12 +30,12 @@ import (
 	"golang.org/x/exp/slices"
 	"golang.org/x/term"
 
-	"github.com/jmorganca/ollama/api"
-	"github.com/jmorganca/ollama/format"
-	"github.com/jmorganca/ollama/parser"
-	"github.com/jmorganca/ollama/progress"
-	"github.com/jmorganca/ollama/server"
-	"github.com/jmorganca/ollama/version"
+	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/format"
+	"github.com/ollama/ollama/parser"
+	"github.com/ollama/ollama/progress"
+	"github.com/ollama/ollama/server"
+	"github.com/ollama/ollama/version"
 )
 
 func CreateHandler(cmd *cobra.Command, args []string) error {
@@ -87,22 +88,82 @@ func CreateHandler(cmd *cobra.Command, args []string) error {
 				path = filepath.Join(filepath.Dir(filename), path)
 			}
 
-			bin, err := os.Open(path)
+			fi, err := os.Stat(path)
 			if errors.Is(err, os.ErrNotExist) && c.Name == "model" {
 				continue
 			} else if err != nil {
 				return err
 			}
-			defer bin.Close()
 
-			hash := sha256.New()
-			if _, err := io.Copy(hash, bin); err != nil {
-				return err
+			// TODO make this work w/ adapters
+			if fi.IsDir() {
+				tf, err := os.CreateTemp("", "ollama-tf")
+				if err != nil {
+					return err
+				}
+				defer os.RemoveAll(tf.Name())
+
+				zf := zip.NewWriter(tf)
+
+				files, err := filepath.Glob(filepath.Join(path, "model-*.safetensors"))
+				if err != nil {
+					return err
+				}
+
+				if len(files) == 0 {
+					return fmt.Errorf("no safetensors files were found in '%s'", path)
+				}
+
+				// add the safetensor config file + tokenizer
+				files = append(files, filepath.Join(path, "config.json"))
+				files = append(files, filepath.Join(path, "added_tokens.json"))
+				files = append(files, filepath.Join(path, "tokenizer.model"))
+
+				for _, fn := range files {
+					f, err := os.Open(fn)
+					if os.IsNotExist(err) && strings.HasSuffix(fn, "added_tokens.json") {
+						continue
+					} else if err != nil {
+						return err
+					}
+
+					fi, err := f.Stat()
+					if err != nil {
+						return err
+					}
+
+					h, err := zip.FileInfoHeader(fi)
+					if err != nil {
+						return err
+					}
+
+					h.Name = filepath.Base(fn)
+					h.Method = zip.Store
+
+					w, err := zf.CreateHeader(h)
+					if err != nil {
+						return err
+					}
+
+					_, err = io.Copy(w, f)
+					if err != nil {
+						return err
+					}
+
+				}
+
+				if err := zf.Close(); err != nil {
+					return err
+				}
+
+				if err := tf.Close(); err != nil {
+					return err
+				}
+				path = tf.Name()
 			}
-			bin.Seek(0, io.SeekStart)
 
-			digest := fmt.Sprintf("sha256:%x", hash.Sum(nil))
-			if err = client.CreateBlob(cmd.Context(), digest, bin); err != nil {
+			digest, err := createBlob(cmd, client, path)
+			if err != nil {
 				return err
 			}
 
@@ -141,7 +202,38 @@ func CreateHandler(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func createBlob(cmd *cobra.Command, client *api.Client, path string) (string, error) {
+	bin, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer bin.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, bin); err != nil {
+		return "", err
+	}
+
+	if _, err := bin.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+
+	digest := fmt.Sprintf("sha256:%x", hash.Sum(nil))
+	if err = client.CreateBlob(cmd.Context(), digest, bin); err != nil {
+		return "", err
+	}
+	return digest, nil
+}
+
 func RunHandler(cmd *cobra.Command, args []string) error {
+	if os.Getenv("OLLAMA_MODELS") != "" {
+		return errors.New("OLLAMA_MODELS must only be set for 'ollama serve'")
+	}
+
+	if err := checkServerHeartbeat(cmd, args); err != nil {
+		return err
+	}
+
 	client, err := api.ClientFromEnvironment()
 	if err != nil {
 		return err
@@ -806,13 +898,20 @@ func versionHandler(cmd *cobra.Command, _ []string) {
 	}
 }
 
+func appendHostEnvDocs(cmd *cobra.Command) {
+	const hostEnvDocs = `
+Environment Variables:
+      OLLAMA_HOST        The host:port or base URL of the Ollama server (e.g. http://localhost:11434)
+`
+	cmd.SetUsageTemplate(cmd.UsageTemplate() + hostEnvDocs)
+}
+
 func NewCLI() *cobra.Command {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	cobra.EnableCommandSorting = false
 
 	if runtime.GOOS == "windows" {
-		// Enable colorful ANSI escape code in Windows terminal (disabled by default)
-		console.ConsoleFromFile(os.Stdout) //nolint:errcheck
+		console.ConsoleFromFile(os.Stdin) //nolint:errcheck
 	}
 
 	rootCmd := &cobra.Command{
@@ -860,18 +959,16 @@ func NewCLI() *cobra.Command {
 	showCmd.Flags().Bool("system", false, "Show system message of a model")
 
 	runCmd := &cobra.Command{
-		Use:     "run MODEL [PROMPT]",
-		Short:   "Run a model",
-		Args:    cobra.MinimumNArgs(1),
-		PreRunE: checkServerHeartbeat,
-		RunE:    RunHandler,
+		Use:   "run MODEL [PROMPT]",
+		Short: "Run a model",
+		Args:  cobra.MinimumNArgs(1),
+		RunE:  RunHandler,
 	}
 
 	runCmd.Flags().Bool("verbose", false, "Show timings for response")
 	runCmd.Flags().Bool("insecure", false, "Use an insecure registry")
 	runCmd.Flags().Bool("nowordwrap", false, "Don't wrap words to the next line automatically")
 	runCmd.Flags().String("format", "", "Response format (e.g. json)")
-
 	serveCmd := &cobra.Command{
 		Use:     "serve",
 		Aliases: []string{"start"},
@@ -879,6 +976,15 @@ func NewCLI() *cobra.Command {
 		Args:    cobra.ExactArgs(0),
 		RunE:    RunServer,
 	}
+	serveCmd.SetUsageTemplate(serveCmd.UsageTemplate() + `
+Environment Variables:
+
+    OLLAMA_HOST         The host:port to bind to (default "127.0.0.1:11434")
+    OLLAMA_ORIGINS      A comma separated list of allowed origins.
+    OLLAMA_MODELS       The path to the models directory (default is "~/.ollama/models")
+    OLLAMA_KEEP_ALIVE   The duration that models stay loaded in memory (default is "5m")
+    OLLAMA_DEBUG        Set to 1 to enable additional debug logging
+`)
 
 	pullCmd := &cobra.Command{
 		Use:     "pull MODEL",
@@ -907,7 +1013,6 @@ func NewCLI() *cobra.Command {
 		PreRunE: checkServerHeartbeat,
 		RunE:    ListHandler,
 	}
-
 	copyCmd := &cobra.Command{
 		Use:     "cp SOURCE TARGET",
 		Short:   "Copy a model",
@@ -922,6 +1027,19 @@ func NewCLI() *cobra.Command {
 		Args:    cobra.MinimumNArgs(1),
 		PreRunE: checkServerHeartbeat,
 		RunE:    DeleteHandler,
+	}
+
+	for _, cmd := range []*cobra.Command{
+		createCmd,
+		showCmd,
+		runCmd,
+		pullCmd,
+		pushCmd,
+		listCmd,
+		copyCmd,
+		deleteCmd,
+	} {
+		appendHostEnvDocs(cmd)
 	}
 
 	rootCmd.AddCommand(
