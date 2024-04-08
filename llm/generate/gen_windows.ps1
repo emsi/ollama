@@ -146,7 +146,7 @@ function compress {
     }
 
     write-host "Compressing dlls..."
-    $binaries = dir "${script:buildDir}/bin/*.dll"
+    $dlls = dir "${script:buildDir}/bin/*.dll"
     foreach ($file in $dlls) {
         & "$script:GZIP" --best -f $file
     }
@@ -183,9 +183,17 @@ if ($null -eq ${env:OLLAMA_SKIP_CPU_GENERATE}) {
 
 # GCC build for direct linking into the Go binary
 init_vars
+# cmake will silently fallback to msvc compilers if mingw isn't in the path, so detect and fail fast
+# as we need this to be compiled by gcc for golang to be able to link with itx
+write-host "Checking for MinGW..."
+# error action ensures we exit on failure
+get-command gcc
+get-command mingw32-make
 $script:cmakeTargets = @("llama", "ggml")
 $script:cmakeDefs = @(
     "-G", "MinGW Makefiles"
+    "-DCMAKE_C_COMPILER=gcc.exe",
+    "-DCMAKE_CXX_COMPILER=g++.exe",
     "-DBUILD_SHARED_LIBS=off",
     "-DLLAMA_NATIVE=off",
     "-DLLAMA_AVX=off",
@@ -234,7 +242,7 @@ if ($null -ne $script:CUDA_LIB_DIR) {
     }
     init_vars
     $script:buildDir="../build/windows/${script:ARCH}/cuda$script:CUDA_VARIANT"
-    $script:cmakeDefs += @("-A", "x64", "-DLLAMA_CUBLAS=ON", "-DLLAMA_AVX=on", "-DLLAMA_AVX2=off", "-DCUDAToolkit_INCLUDE_DIR=$script:CUDA_INCLUDE_DIR", "-DCMAKE_CUDA_ARCHITECTURES=${script:CMAKE_CUDA_ARCHITECTURES}")
+    $script:cmakeDefs += @("-A", "x64", "-DLLAMA_CUDA=ON", "-DLLAMA_AVX=on", "-DLLAMA_AVX2=off", "-DCUDAToolkit_INCLUDE_DIR=$script:CUDA_INCLUDE_DIR", "-DCMAKE_CUDA_ARCHITECTURES=${script:CMAKE_CUDA_ARCHITECTURES}")
     build
     sign
     compress
@@ -253,6 +261,7 @@ if ($null -ne $env:HIP_PATH) {
         "-DCMAKE_C_COMPILER=clang.exe",
         "-DCMAKE_CXX_COMPILER=clang++.exe",
         "-DLLAMA_HIPBLAS=on",
+        "-DHIP_PLATFORM=amd",
         "-DLLAMA_AVX=on",
         "-DLLAMA_AVX2=off",
         "-DCMAKE_POSITION_INDEPENDENT_CODE=on",
