@@ -60,10 +60,10 @@ Here are some example models that can be downloaded:
 | Llama 2 13B        | 13B        | 7.3GB | `ollama run llama2:13b`        |
 | Llama 2 70B        | 70B        | 39GB  | `ollama run llama2:70b`        |
 | Orca Mini          | 3B         | 1.9GB | `ollama run orca-mini`         |
-| Vicuna             | 7B         | 3.8GB | `ollama run vicuna`            |
 | LLaVA              | 7B         | 4.5GB | `ollama run llava`             |
 | Gemma              | 2B         | 1.4GB | `ollama run gemma:2b`          |
 | Gemma              | 7B         | 4.8GB | `ollama run gemma:7b`          |
+| Solar              | 10.7B      | 6.1GB | `ollama run solar`             |
 
 > Note: You should have at least 8 GB of RAM available to run the 7B models, 16 GB to run the 13B models, and 32 GB to run the 33B models.
 
@@ -292,6 +292,7 @@ See the [API documentation](./docs/api.md) for all endpoints.
 - [Ollama-chats RPG](https://github.com/drazdra/ollama-chats)
 - [ChatOllama: Open Source Chatbot based on Ollama with Knowledge Bases](https://github.com/sugarforever/chat-ollama)
 - [CRAG Ollama Chat: Simple Web Search with Corrective RAG](https://github.com/Nagi-ovo/CRAG-Ollama-Chat)
+- [RAGFlow: Open-source Retrieval-Augmented Generation engine based on deep document understanding](https://github.com/infiniflow/ragflow)
 
 ### Terminal
 
@@ -315,7 +316,7 @@ See the [API documentation](./docs/api.md) for all endpoints.
 
 ### Database
 
-- [MindsDB](https://github.com/mindsdb/mindsdb/blob/staging/mindsdb/integrations/handlers/ollama_handler/README.md)
+- [MindsDB](https://github.com/mindsdb/mindsdb/blob/staging/mindsdb/integrations/handlers/ollama_handler/README.md) (Connects Ollama models with nearly 200 data platforms and apps)
 - [chromem-go](https://github.com/philippgille/chromem-go/blob/v0.5.0/embed_ollama.go) with [example](https://github.com/philippgille/chromem-go/tree/v0.5.0/examples/rag-wikipedia-ollama)
 
 ### Package managers
@@ -376,3 +377,6 @@ See the [API documentation](./docs/api.md) for all endpoints.
 - [Page Assist](https://github.com/n4ze3m/page-assist) (Chrome Extension)
 - [AI Telegram Bot](https://github.com/tusharhero/aitelegrambot) (Telegram bot using Ollama in backend)
 - [AI ST Completion](https://github.com/yaroslavyaroslav/OpenAI-sublime-text) (Sublime Text 4 AI assistant plugin with Ollama support)
+
+### Supported backends 
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) project founded by Georgi Gerganov. 
