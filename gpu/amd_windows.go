@@ -14,7 +14,6 @@ import (
 )
 
 const (
-	RocmStandardLocation = "C:\\Program Files\\AMD\\ROCm\\5.7\\bin" // TODO glob?
 
 	// TODO  We're lookinng for this exact name to detect iGPUs since hipGetDeviceProperties never reports integrated==true
 	iGPUName = "AMD Radeon(TM) Graphics"
@@ -22,7 +21,8 @@ const (
 
 var (
 	// Used to validate if the given ROCm lib is usable
-	ROCmLibGlobs = []string{"hipblas.dll", "rocblas"} // TODO - probably include more coverage of files here...
+	ROCmLibGlobs          = []string{"hipblas.dll", "rocblas"}                 // TODO - probably include more coverage of files here...
+	RocmStandardLocations = []string{"C:\\Program Files\\AMD\\ROCm\\5.7\\bin"} // TODO glob?
 )
 
 func AMDGetGPUInfo() []GpuInfo {
@@ -149,13 +149,16 @@ func AMDGetGPUInfo() []GpuInfo {
 			}
 		}
 		if patch != "" {
-			gpuInfo.Patch, err = strconv.Atoi(patch)
+			// Patch rev is hex; e.g. gfx90a
+			p, err := strconv.ParseInt(patch, 16, 0)
 			if err != nil {
 				slog.Info("failed to parse version", "version", gfx, "error", err)
+			} else {
+				gpuInfo.Patch = int(p)
 			}
 		}
 		if gpuInfo.Major < RocmComputeMin {
-			slog.Warn(fmt.Sprintf("amdgpu [%s] too old gfx%d%d%d", gpuInfo.ID, gpuInfo.Major, gpuInfo.Minor, gpuInfo.Patch))
+			slog.Warn(fmt.Sprintf("amdgpu [%s] too old gfx%d%d%x", gpuInfo.ID, gpuInfo.Major, gpuInfo.Minor, gpuInfo.Patch))
 			continue
 		}
 
