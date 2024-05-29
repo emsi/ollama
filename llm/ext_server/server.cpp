@@ -66,7 +66,7 @@ struct server_params {
 };
 
 bool server_verbose = false;
-bool server_log_json = true;
+bool server_log_json = false;
 
 enum stop_type {
     STOP_FULL,
@@ -266,7 +266,7 @@ struct server_slot {
         sprintf(buffer, "prompt eval time     = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)",
                 t_prompt_processing, n_prompt_tokens_processed,
                 t_token, n_tokens_second);
-        LOG_INFO(buffer, {
+        LOG_DEBUG(buffer, {
             {"slot_id",                   id},
             {"task_id",                   task_id},
             {"t_prompt_processing",       t_prompt_processing},
@@ -280,7 +280,7 @@ struct server_slot {
         sprintf(buffer, "generation eval time = %10.2f ms / %5d runs   (%8.2f ms per token, %8.2f tokens per second)",
                 t_token_generation, n_decoded,
                 t_token, n_tokens_second);
-        LOG_INFO(buffer, {
+        LOG_DEBUG(buffer, {
             {"slot_id",            id},
             {"task_id",            task_id},
             {"t_token_generation", t_token_generation},
@@ -290,7 +290,7 @@ struct server_slot {
         });
 
         sprintf(buffer, "          total time = %10.2f ms", t_prompt_processing + t_token_generation);
-        LOG_INFO(buffer, {
+        LOG_DEBUG(buffer, {
             {"slot_id",             id},
             {"task_id",             task_id},
             {"t_prompt_processing", t_prompt_processing},
@@ -334,6 +334,7 @@ struct server_metrics {
 struct llama_server_context
 {
     llama_model *model = nullptr;
+    float modelProgress = 0.0;
     llama_context *ctx = nullptr;
 
     clip_ctx *clp_ctx = nullptr;
@@ -371,7 +372,7 @@ struct llama_server_context
     {
         if (clp_ctx)
         {
-            LOG_INFO("freeing clip model", {});
+            LOG_DEBUG("freeing clip model", {});
             clip_free(clp_ctx);
             clp_ctx = nullptr;
         }
@@ -392,7 +393,7 @@ struct llama_server_context
         params = params_;
         if (!params.mmproj.empty()) {
             multimodal = true;
-            LOG_INFO("Multi Modal Mode Enabled", {});
+            LOG_DEBUG("Multi Modal Mode Enabled", {});
             clp_ctx = clip_model_load(params.mmproj.c_str(), /*verbosity=*/ 1);
             if(clp_ctx == nullptr) {
                 LOG_ERROR("unable to load clip model", {{"model", params.mmproj}});
@@ -445,7 +446,7 @@ struct llama_server_context
 
         const int32_t n_ctx_slot = n_ctx / params.n_parallel;
 
-        LOG_INFO("initializing slots", {{"n_slots", params.n_parallel}});
+        LOG_DEBUG("initializing slots", {{"n_slots", params.n_parallel}});
         for (int i = 0; i < params.n_parallel; i++)
         {
             server_slot slot;
@@ -454,7 +455,7 @@ struct llama_server_context
             slot.n_ctx = n_ctx_slot;
             slot.n_predict = params.n_predict;
 
-            LOG_INFO("new slot", {
+            LOG_DEBUG("new slot", {
                 {"slot_id",    slot.id},
                 {"n_ctx_slot", slot.n_ctx}
             });
@@ -468,7 +469,7 @@ struct llama_server_context
                 //GGML_ASSERT(n_ctx_train % ga_w == 0     && "n_ctx_train must be a multiple of ga_w");    // NOLINT
                 //GGML_ASSERT(n_ctx >= n_ctx_train * ga_n && "n_ctx must be at least n_ctx_train * ga_n"); // NOLINT
 
-                LOG_INFO("slot self-extend", {
+                LOG_DEBUG("slot self-extend", {
                     {"slot_id",   slot.id},
                     {"ga_n",      ga_n},
                     {"ga_w",      ga_w}
@@ -737,7 +738,7 @@ struct llama_server_context
                     sampler_names.emplace_back(sampler_name);
                 }
             }
-            slot->sparams.samplers_sequence = sampler_types_from_names(sampler_names, false);
+            slot->sparams.samplers_sequence = llama_sampling_types_from_names(sampler_names, false);
         }
         else
         {
@@ -827,7 +828,7 @@ struct llama_server_context
 
         all_slots_are_idle = false;
 
-        LOG_INFO("slot is processing task", {
+        LOG_DEBUG("slot is processing task", {
             {"slot_id", slot->id},
             {"task_id", slot->task_id},
         });
@@ -1095,7 +1096,7 @@ struct llama_server_context
         std::vector<std::string> samplers_sequence;
         for (const auto &sampler_type : slot.sparams.samplers_sequence)
         {
-            samplers_sequence.emplace_back(sampler_type_to_name_string(sampler_type));
+            samplers_sequence.emplace_back(llama_sampling_type_to_str(sampler_type));
         }
 
         return json {
@@ -1504,7 +1505,7 @@ struct llama_server_context
                     }
                     slots_data.push_back(slot_data);
                 }
-                LOG_INFO("slot data", {
+                LOG_DEBUG("slot data", {
                     {"task_id",            task.id},
                     {"n_idle_slots",       n_idle_slots},
                     {"n_processing_slots", n_processing_slots}
@@ -1566,7 +1567,7 @@ struct llama_server_context
     bool update_slots() {
         if (system_need_update)
         {
-            LOG_INFO("updating system prompt", {});
+            LOG_DEBUG("updating system prompt", {});
             system_prompt_update();
         }
 
@@ -1576,7 +1577,7 @@ struct llama_server_context
         {
             if (system_prompt.empty() && clean_kv_cache)
             {
-                LOG_INFO("all slots are idle and system prompt is empty, clear the KV cache", {});
+                LOG_DEBUG("all slots are idle and system prompt is empty, clear the KV cache", {});
                 kv_cache_clear();
             }
             return true;
@@ -1599,7 +1600,7 @@ struct llama_server_context
                     const int n_left    = (int) system_tokens.size() + slot.n_past - n_keep;
                     const int n_discard = n_left / 2;
 
-                    LOG_INFO("slot context shift", {
+                    LOG_DEBUG("slot context shift", {
                         {"slot_id",         slot.id},
                         {"task_id",         slot.task_id},
                         {"n_keep",          n_keep},
@@ -1638,7 +1639,7 @@ struct llama_server_context
                 slot.command = NONE;
                 slot.t_last_used = ggml_time_us();
 
-                LOG_INFO("slot released", {
+                LOG_DEBUG("slot released", {
                     {"slot_id",         slot.id},
                     {"task_id",         slot.task_id},
                     {"n_ctx",           n_ctx},
@@ -1807,7 +1808,7 @@ struct llama_server_context
                             slot.ga_i = ga_i;
                         }
 
-                        LOG_INFO("slot progression", {
+                        LOG_DEBUG("slot progression", {
                             { "slot_id",    slot.id },
                             { "task_id",    slot.task_id },
                             { "n_past",     slot.n_past },
@@ -1822,7 +1823,7 @@ struct llama_server_context
                     if (slot.n_past == slot.n_prompt_tokens && slot.n_past > 0)
                     {
                         // we have to evaluate at least 1 token to generate logits.
-                        LOG_INFO("we have to evaluate at least 1 token to generate logits", {
+                        LOG_DEBUG("we have to evaluate at least 1 token to generate logits", {
                             { "slot_id", slot.id },
                             { "task_id", slot.task_id }
                         });
@@ -1834,7 +1835,7 @@ struct llama_server_context
                     }
 
                     int p0 = (int) system_tokens.size() + slot.n_past;
-                    LOG_INFO("kv cache rm [p0, end)", {
+                    LOG_DEBUG("kv cache rm [p0, end)", {
                         { "slot_id", slot.id },
                         { "task_id", slot.task_id },
                         { "p0",      p0 }
@@ -2104,6 +2105,7 @@ static void server_print_usage(const char *argv0, const gpt_params &params,
     printf("  --embedding               enable embedding vector output (default: %s)\n", params.embedding ? "enabled" : "disabled");
     printf("  -np N, --parallel N       number of slots for process requests (default: %d)\n", params.n_parallel);
     printf("  -cb, --cont-batching      enable continuous batching (a.k.a dynamic batching) (default: disabled)\n");
+    printf("  -fa, --flash-attn         enable Flash Attention (default: %s)\n", params.flash_attn ? "enabled" : "disabled");
     printf("  -spf FNAME, --system-prompt-file FNAME\n");
     printf("                            set a file to load a system prompt (initial prompt of all slots), this is useful for chat applications.\n");
     printf("  -ctk TYPE, --cache-type-k TYPE\n");
@@ -2491,11 +2493,7 @@ static void server_params_parse(int argc, char **argv, server_params &sparams,
         }
         else if (arg == "-v" || arg == "--verbose")
         {
-#if SERVER_VERBOSE != 1
-            LOG_WARNING("server.cpp is not built with verbose logging.", {});
-#else
             server_verbose = true;
-#endif
         }
         else if (arg == "--mlock")
         {
@@ -2505,7 +2503,8 @@ static void server_params_parse(int argc, char **argv, server_params &sparams,
         {
             params.use_mmap = false;
         }
-        else if (arg == "--numa") {
+        else if (arg == "--numa")
+        {
             if (++i >= argc) {
                 invalid_param = true;
                 break;
@@ -2525,6 +2524,10 @@ static void server_params_parse(int argc, char **argv, server_params &sparams,
         {
             params.cont_batching = true;
         }
+        else if (arg == "-fa" || arg == "--flash-attn")
+        {
+            params.flash_attn = true;
+        }
         else if (arg == "-np" || arg == "--parallel")
         {
             if (++i >= argc)
@@ -2533,7 +2536,8 @@ static void server_params_parse(int argc, char **argv, server_params &sparams,
                 break;
             }
             params.n_parallel = std::stoi(argv[i]);
-        } else if (arg == "-n" || arg == "--n-predict")
+        }
+        else if (arg == "-n" || arg == "--n-predict")
         {
             if (++i >= argc)
             {
@@ -2541,7 +2545,8 @@ static void server_params_parse(int argc, char **argv, server_params &sparams,
                 break;
             }
             params.n_predict = std::stoi(argv[i]);
-        } else if (arg == "-spf" || arg == "--system-prompt-file")
+        }
+        else if (arg == "-spf" || arg == "--system-prompt-file")
         {
             if (++i >= argc)
             {
@@ -2601,7 +2606,7 @@ static void server_params_parse(int argc, char **argv, server_params &sparams,
         else if (arg == "--log-disable")
         {
             log_set_target(stdout);
-            LOG_INFO("logging to file is disabled.", {});
+            LOG_DEBUG("logging to file is disabled.", {});
         }
         else if (arg == "--slots-endpoint-disable")
         {
@@ -2727,12 +2732,12 @@ static json format_detokenized_response(std::string content)
 static void log_server_request(const httplib::Request &req, const httplib::Response &res)
 {
     // skip GH copilot requests when using default port
-    if (req.path == "/v1/health" || req.path == "/v1/completions")
+    if (req.path == "/health" || req.path == "/v1/health" || req.path == "/v1/completions")
     {
         return;
     }
 
-    LOG_INFO("request", {
+    LOG_DEBUG("request", {
         {"remote_addr", req.remote_addr},
         {"remote_port", req.remote_port},
         {"status",      res.status},
@@ -2773,6 +2778,12 @@ inline void signal_handler(int signal) {
         exit(1);
     }
     shutdown_handler(signal);
+}
+
+static bool update_load_progress(float progress, void *data)
+{
+    ((llama_server_context*)data)->modelProgress = progress;
+    return true;
 }
 
 #if defined(_WIN32)
@@ -2880,7 +2891,9 @@ int main(int argc, char **argv) {
                 break;
             }
             case SERVER_STATE_LOADING_MODEL:
-                res.set_content(R"({"status": "loading model"})", "application/json");
+                char buf[128];
+                snprintf(&buf[0], 128, R"({"status": "loading model", "progress": %0.2f})", llama.modelProgress);
+                res.set_content(buf, "application/json");
                 res.status = 503; // HTTP Service Unavailable
                 break;
             case SERVER_STATE_ERROR:
@@ -3054,7 +3067,30 @@ int main(int argc, char **argv) {
         log_data["api_key"] = "api_key: " + std::to_string(sparams.api_keys.size()) + " keys loaded";
     }
 
+    if (sparams.n_threads_http < 1) {
+        // +2 threads for monitoring endpoints
+        sparams.n_threads_http = std::max(params.n_parallel + 2, (int32_t) std::thread::hardware_concurrency() - 1);
+    }
+    log_data["n_threads_http"] =  std::to_string(sparams.n_threads_http);
+    svr.new_task_queue = [&sparams] { return new httplib::ThreadPool(sparams.n_threads_http); };
+
+    LOG_INFO("HTTP server listening", log_data);
+    // run the HTTP server in a thread - see comment below
+    std::thread t([&]()
+            {
+                if (!svr.listen_after_bind())
+                {
+                    state.store(SERVER_STATE_ERROR);
+                    return 1;
+                }
+
+                return 0;
+            });
+
     // load the model
+    params.progress_callback = update_load_progress;
+    params.progress_callback_user_data = (void*)&llama;
+
     if (!llama.load_model(params))
     {
         state.store(SERVER_STATE_ERROR);
@@ -3257,26 +3293,6 @@ int main(int argc, char **argv) {
         }
     }*/
     //);
-
-    if (sparams.n_threads_http < 1) {
-        // +2 threads for monitoring endpoints
-        sparams.n_threads_http = std::max(params.n_parallel + 2, (int32_t) std::thread::hardware_concurrency() - 1);
-    }
-    log_data["n_threads_http"] =  std::to_string(sparams.n_threads_http);
-    svr.new_task_queue = [&sparams] { return new httplib::ThreadPool(sparams.n_threads_http); };
-
-    LOG_INFO("HTTP server listening", log_data);
-    // run the HTTP server in a thread - see comment below
-    std::thread t([&]()
-            {
-                if (!svr.listen_after_bind())
-                {
-                    state.store(SERVER_STATE_ERROR);
-                    return 1;
-                }
-
-                return 0;
-            });
 
     llama.queue_tasks.on_new_task(std::bind(
         &llama_server_context::process_single_task, &llama, std::placeholders::_1));

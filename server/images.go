@@ -27,7 +27,8 @@ import (
 	"github.com/ollama/ollama/auth"
 	"github.com/ollama/ollama/format"
 	"github.com/ollama/ollama/llm"
-	"github.com/ollama/ollama/server/envconfig"
+	"github.com/ollama/ollama/parser"
+	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/types/errtypes"
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/version"
@@ -61,36 +62,36 @@ func (m *Model) IsEmbedding() bool {
 }
 
 func (m *Model) String() string {
-	var modelfile model.File
+	var modelfile parser.File
 
-	modelfile.Commands = append(modelfile.Commands, model.Command{
+	modelfile.Commands = append(modelfile.Commands, parser.Command{
 		Name: "model",
 		Args: m.ModelPath,
 	})
 
 	for _, adapter := range m.AdapterPaths {
-		modelfile.Commands = append(modelfile.Commands, model.Command{
+		modelfile.Commands = append(modelfile.Commands, parser.Command{
 			Name: "adapter",
 			Args: adapter,
 		})
 	}
 
 	for _, projector := range m.ProjectorPaths {
-		modelfile.Commands = append(modelfile.Commands, model.Command{
+		modelfile.Commands = append(modelfile.Commands, parser.Command{
 			Name: "model",
 			Args: projector,
 		})
 	}
 
 	if m.Template != "" {
-		modelfile.Commands = append(modelfile.Commands, model.Command{
+		modelfile.Commands = append(modelfile.Commands, parser.Command{
 			Name: "template",
 			Args: m.Template,
 		})
 	}
 
 	if m.System != "" {
-		modelfile.Commands = append(modelfile.Commands, model.Command{
+		modelfile.Commands = append(modelfile.Commands, parser.Command{
 			Name: "system",
 			Args: m.System,
 		})
@@ -100,13 +101,13 @@ func (m *Model) String() string {
 		switch v := v.(type) {
 		case []any:
 			for _, s := range v {
-				modelfile.Commands = append(modelfile.Commands, model.Command{
+				modelfile.Commands = append(modelfile.Commands, parser.Command{
 					Name: k,
 					Args: fmt.Sprintf("%v", s),
 				})
 			}
 		default:
-			modelfile.Commands = append(modelfile.Commands, model.Command{
+			modelfile.Commands = append(modelfile.Commands, parser.Command{
 				Name: k,
 				Args: fmt.Sprintf("%v", v),
 			})
@@ -114,14 +115,14 @@ func (m *Model) String() string {
 	}
 
 	for _, license := range m.License {
-		modelfile.Commands = append(modelfile.Commands, model.Command{
+		modelfile.Commands = append(modelfile.Commands, parser.Command{
 			Name: "license",
 			Args: license,
 		})
 	}
 
 	for _, msg := range m.Messages {
-		modelfile.Commands = append(modelfile.Commands, model.Command{
+		modelfile.Commands = append(modelfile.Commands, parser.Command{
 			Name: "message",
 			Args: fmt.Sprintf("%s %s", msg.Role, msg.Content),
 		})
@@ -314,7 +315,7 @@ func realpath(rel, from string) string {
 	return abspath
 }
 
-func CreateModel(ctx context.Context, name, modelFileDir, quantization string, modelfile *model.File, fn func(resp api.ProgressResponse)) (err error) {
+func CreateModel(ctx context.Context, name, modelFileDir, quantization string, modelfile *parser.File, fn func(resp api.ProgressResponse)) (err error) {
 	config := ConfigV2{
 		OS:           "linux",
 		Architecture: "amd64",
@@ -339,7 +340,24 @@ func CreateModel(ctx context.Context, name, modelFileDir, quantization string, m
 					return err
 				}
 			} else if strings.HasPrefix(c.Args, "@") {
-				blobpath, err := GetBlobsPath(strings.TrimPrefix(c.Args, "@"))
+				digest := strings.TrimPrefix(c.Args, "@")
+				if ib, ok := intermediateBlobs[digest]; ok {
+					p, err := GetBlobsPath(ib)
+					if err != nil {
+						return err
+					}
+
+					if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+						// pass
+					} else if err != nil {
+						return err
+					} else {
+						fn(api.ProgressResponse{Status: fmt.Sprintf("using cached layer %s", ib)})
+						digest = ib
+					}
+				}
+
+				blobpath, err := GetBlobsPath(digest)
 				if err != nil {
 					return err
 				}
@@ -350,14 +368,14 @@ func CreateModel(ctx context.Context, name, modelFileDir, quantization string, m
 				}
 				defer blob.Close()
 
-				baseLayers, err = parseFromFile(ctx, blob, fn)
+				baseLayers, err = parseFromFile(ctx, blob, digest, fn)
 				if err != nil {
 					return err
 				}
 			} else if file, err := os.Open(realpath(modelFileDir, c.Args)); err == nil {
 				defer file.Close()
 
-				baseLayers, err = parseFromFile(ctx, file, fn)
+				baseLayers, err = parseFromFile(ctx, file, "", fn)
 				if err != nil {
 					return err
 				}
@@ -397,10 +415,17 @@ func CreateModel(ctx context.Context, name, modelFileDir, quantization string, m
 							return err
 						}
 
-						baseLayer.Layer, err = NewLayer(temp, baseLayer.Layer.MediaType)
+						layers, err := parseFromFile(ctx, temp, "", fn)
 						if err != nil {
 							return err
 						}
+
+						if len(layers) != 1 {
+							return errors.New("quantization failed")
+						}
+
+						baseLayer.Layer = layers[0].Layer
+						baseLayer.GGML = layers[0].GGML
 					}
 				}
 
@@ -565,7 +590,7 @@ func CreateModel(ctx context.Context, name, modelFileDir, quantization string, m
 	}
 
 	if !envconfig.NoPrune {
-		if err := deleteUnusedLayers(nil, unref, false); err != nil {
+		if err := deleteUnusedLayers(nil, unref); err != nil {
 			return err
 		}
 	}
@@ -613,7 +638,7 @@ func CopyModel(src, dst model.Name) error {
 	return err
 }
 
-func deleteUnusedLayers(skipModelPath *ModelPath, deleteMap map[string]struct{}, dryRun bool) error {
+func deleteUnusedLayers(skipModelPath *ModelPath, deleteMap map[string]struct{}) error {
 	fp, err := GetManifestPath()
 	if err != nil {
 		return err
@@ -660,13 +685,9 @@ func deleteUnusedLayers(skipModelPath *ModelPath, deleteMap map[string]struct{},
 			slog.Info(fmt.Sprintf("couldn't get file path for '%s': %v", k, err))
 			continue
 		}
-		if !dryRun {
-			if err := os.Remove(fp); err != nil {
-				slog.Info(fmt.Sprintf("couldn't remove file '%s': %v", fp, err))
-				continue
-			}
-		} else {
-			slog.Info(fmt.Sprintf("wanted to remove: %s", fp))
+		if err := os.Remove(fp); err != nil {
+			slog.Info(fmt.Sprintf("couldn't remove file '%s': %v", fp, err))
+			continue
 		}
 	}
 
@@ -689,14 +710,25 @@ func PruneLayers() error {
 	for _, blob := range blobs {
 		name := blob.Name()
 		name = strings.ReplaceAll(name, "-", ":")
-		if strings.HasPrefix(name, "sha256:") {
-			deleteMap[name] = struct{}{}
+
+		_, err := GetBlobsPath(name)
+		if err != nil {
+			if errors.Is(err, ErrInvalidDigestFormat) {
+				// remove invalid blobs (e.g. partial downloads)
+				if err := os.Remove(filepath.Join(p, blob.Name())); err != nil {
+					slog.Error("couldn't remove blob", "blob", blob.Name(), "error", err)
+				}
+			}
+
+			continue
 		}
+
+		deleteMap[name] = struct{}{}
 	}
 
 	slog.Info(fmt.Sprintf("total blobs: %d", len(deleteMap)))
 
-	err = deleteUnusedLayers(nil, deleteMap, false)
+	err = deleteUnusedLayers(nil, deleteMap)
 	if err != nil {
 		return err
 	}
@@ -752,7 +784,7 @@ func DeleteModel(name string) error {
 	}
 	deleteMap[manifest.Config.Digest] = struct{}{}
 
-	err = deleteUnusedLayers(&mp, deleteMap, false)
+	err = deleteUnusedLayers(&mp, deleteMap)
 	if err != nil {
 		return err
 	}
@@ -912,7 +944,7 @@ func PullModel(ctx context.Context, name string, regOpts *registryOptions, fn fu
 
 	if noprune == "" {
 		fn(api.ProgressResponse{Status: "removing any unused layers"})
-		err = deleteUnusedLayers(nil, deleteMap, false)
+		err = deleteUnusedLayers(nil, deleteMap)
 		if err != nil {
 			return err
 		}
